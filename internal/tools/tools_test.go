@@ -57,9 +57,15 @@ func defaultHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// newSession wires a fake Proxmox API to a server with all tools registered,
-// and returns a connected in-memory MCP client session.
+// newSession wires a fake Proxmox API to a server with the read-only tools
+// registered, and returns a connected in-memory MCP client session.
 func newSession(t *testing.T, fake *fakeProxmox) *mcp.ClientSession {
+	return newSessionWrite(t, fake, false)
+}
+
+// newSessionWrite is like newSession but lets the test choose whether the
+// mutating tools are registered.
+func newSessionWrite(t *testing.T, fake *fakeProxmox, allowWrite bool) *mcp.ClientSession {
 	t.Helper()
 	client := proxmox.NewClient(proxmox.Config{
 		URL:         fake.URL,
@@ -67,7 +73,7 @@ func newSession(t *testing.T, fake *fakeProxmox) *mcp.ClientSession {
 		TokenSecret: "secret",
 	})
 	server := mcp.NewServer(&mcp.Implementation{Name: "go-mcp-proxmox", Version: "test"}, nil)
-	Register(server, client)
+	Register(server, client, allowWrite)
 
 	st, ct := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(context.Background(), st, nil); err != nil {
@@ -212,5 +218,100 @@ func TestPermissionErrorSurfacedAsToolError(t *testing.T) {
 	res = callTool(t, session, "get_cluster_resources", map[string]any{"type": "bogus"})
 	if !res.IsError {
 		t.Error("invalid type must produce a tool error")
+	}
+}
+
+// writeToolNames are the mutating tools registered only when write is enabled.
+var writeToolNames = []string{
+	"start_guest", "stop_guest", "shutdown_guest", "reboot_guest",
+	"list_snapshots", "create_snapshot", "rollback_snapshot", "delete_snapshot",
+	"clone_vm", "delete_guest", "migrate_guest", "resize_disk",
+}
+
+func listToolNames(t *testing.T, session *mcp.ClientSession) map[string]bool {
+	t.Helper()
+	res, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	names := map[string]bool{}
+	for _, tool := range res.Tools {
+		names[tool.Name] = true
+	}
+	return names
+}
+
+func TestWriteToolsAbsentWhenDisabled(t *testing.T) {
+	session := newSessionWrite(t, newFakeProxmox(t, defaultHandler), false)
+	names := listToolNames(t, session)
+	for _, name := range writeToolNames {
+		if names[name] {
+			t.Errorf("mutating tool %q must not be registered when write is disabled", name)
+		}
+	}
+	// Read-only tools remain available.
+	if !names["list_nodes"] {
+		t.Error("read-only tools must stay registered")
+	}
+}
+
+func TestWriteToolsPresentWhenEnabled(t *testing.T) {
+	session := newSessionWrite(t, newFakeProxmox(t, defaultHandler), true)
+	names := listToolNames(t, session)
+	for _, name := range writeToolNames {
+		if !names[name] {
+			t.Errorf("mutating tool %q must be registered when write is enabled", name)
+		}
+	}
+}
+
+func TestWriteToolHappyPath(t *testing.T) {
+	var gotMethod, gotPath string
+	fake := newFakeProxmox(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.Write([]byte(`{"data": "UPID:thor:00001234:..:task:"}`))
+	})
+	session := newSessionWrite(t, fake, true)
+
+	res := callTool(t, session, "start_guest", map[string]any{"node": "thor", "vmid": 103, "type": "qemu"})
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", textOf(t, res))
+	}
+	if gotMethod != http.MethodPost || gotPath != "/api2/json/nodes/thor/qemu/103/status/start" {
+		t.Errorf("unexpected request %s %s", gotMethod, gotPath)
+	}
+	if text := textOf(t, res); !strings.Contains(text, "UPID:thor") {
+		t.Errorf("result should contain the task UPID, got: %s", text)
+	}
+}
+
+func TestWriteToolInvalidTypeSkipsAPI(t *testing.T) {
+	fake := newFakeProxmox(t, defaultHandler)
+	session := newSessionWrite(t, fake, true)
+	before := fake.requests.Load()
+
+	res := callTool(t, session, "stop_guest", map[string]any{"node": "thor", "vmid": 103, "type": "bogus"})
+	if !res.IsError {
+		t.Fatal("invalid guest type must produce a tool error")
+	}
+	if got := fake.requests.Load(); got != before {
+		t.Errorf("Proxmox API was contacted %d time(s) for an invalid type; want 0", got-before)
+	}
+}
+
+func TestWriteToolMissingParamSkipsAPI(t *testing.T) {
+	fake := newFakeProxmox(t, defaultHandler)
+	session := newSessionWrite(t, fake, true)
+	before := fake.requests.Load()
+
+	// vmid omitted: rejected at schema validation or by the handler, never reaching the API.
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "start_guest", Arguments: map[string]any{"node": "thor", "type": "qemu"},
+	})
+	if err == nil && !res.IsError {
+		t.Fatal("call without required 'vmid' must fail")
+	}
+	if got := fake.requests.Load(); got != before {
+		t.Errorf("Proxmox API was contacted %d time(s); want 0", got-before)
 	}
 }

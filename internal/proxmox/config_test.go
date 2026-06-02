@@ -40,6 +40,29 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "write disabled by default",
+			env:  valid,
+			check: func(t *testing.T, cfg Config) {
+				if cfg.AllowWrite {
+					t.Error("AllowWrite should default to false")
+				}
+			},
+		},
+		{
+			name: "write opt-in",
+			env:  merge(valid, map[string]string{EnvAllowWrite: "true"}),
+			check: func(t *testing.T, cfg Config) {
+				if !cfg.AllowWrite {
+					t.Error("AllowWrite should be true")
+				}
+			},
+		},
+		{
+			name:     "invalid allow write value",
+			env:      merge(valid, map[string]string{EnvAllowWrite: "maybe"}),
+			wantErrs: []string{EnvAllowWrite},
+		},
+		{
 			name:     "multiple missing vars reported together",
 			env:      map[string]string{EnvTokenID: "mcp@pve!claude"},
 			wantErrs: []string{EnvURL, EnvTokenSecret},
@@ -63,7 +86,7 @@ func TestLoadConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, key := range []string{EnvURL, EnvTokenID, EnvTokenSecret, EnvInsecureTLS} {
+			for _, key := range []string{EnvURL, EnvTokenID, EnvTokenSecret, EnvInsecureTLS, EnvAllowWrite} {
 				t.Setenv(key, "")
 			}
 			for k, v := range tt.env {

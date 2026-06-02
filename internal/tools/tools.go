@@ -16,8 +16,9 @@ import (
 	"github.com/banux/go-mcp-proxmox/internal/proxmox"
 )
 
-// Register adds every available tool to the server.
-func Register(server *mcp.Server, client *proxmox.Client) {
+// Register adds the available tools to the server. The read-only tools are
+// always registered; the mutating tools are added only when allowWrite is true.
+func Register(server *mcp.Server, client *proxmox.Client, allowWrite bool) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_nodes",
 		Description: "List the Proxmox cluster nodes with their status and resource usage.",
@@ -47,6 +48,10 @@ func Register(server *mcp.Server, client *proxmox.Client) {
 		Name:        "get_cluster_resources",
 		Description: "List cluster resources (VMs, containers, storages, nodes), optionally filtered by type: vm, storage, node or sdn.",
 	}, getClusterResources(client))
+
+	if allowWrite {
+		registerWriteTools(server, client)
+	}
 }
 
 // jsonResult marshals v as indented JSON into a tool result.
