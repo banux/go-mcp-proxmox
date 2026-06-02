@@ -43,8 +43,11 @@ func run(ctx context.Context, cfg proxmox.Config) error {
 		Name:    "go-mcp-proxmox",
 		Version: version,
 	}, nil)
-	tools.Register(server, client)
+	tools.Register(server, client, cfg.AllowWrite)
 
+	if cfg.AllowWrite {
+		log.Print("write tools ENABLED (PROXMOX_ALLOW_WRITE=true)")
+	}
 	log.Printf("serving MCP over stdio, Proxmox at %s", cfg.URL)
 	return server.Run(ctx, &mcp.StdioTransport{})
 }

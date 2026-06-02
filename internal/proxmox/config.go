@@ -17,6 +17,7 @@ const (
 	EnvTokenID     = "PROXMOX_TOKEN_ID"
 	EnvTokenSecret = "PROXMOX_TOKEN_SECRET"
 	EnvInsecureTLS = "PROXMOX_INSECURE_TLS"
+	EnvAllowWrite  = "PROXMOX_ALLOW_WRITE"
 )
 
 // tokenIDRe matches the Proxmox API token ID format: user@realm!tokenid.
@@ -32,6 +33,9 @@ type Config struct {
 	TokenSecret string
 	// InsecureTLS disables TLS certificate verification when true.
 	InsecureTLS bool
+	// AllowWrite enables the mutating tools. When false (the default), the
+	// server exposes only read-only tools.
+	AllowWrite bool
 }
 
 // String implements fmt.Stringer and redacts the token secret.
@@ -40,8 +44,8 @@ func (c Config) String() string {
 	if c.TokenSecret != "" {
 		secret = "[REDACTED]"
 	}
-	return fmt.Sprintf("proxmox.Config{URL: %q, TokenID: %q, TokenSecret: %q, InsecureTLS: %t}",
-		c.URL, c.TokenID, secret, c.InsecureTLS)
+	return fmt.Sprintf("proxmox.Config{URL: %q, TokenID: %q, TokenSecret: %q, InsecureTLS: %t, AllowWrite: %t}",
+		c.URL, c.TokenID, secret, c.InsecureTLS, c.AllowWrite)
 }
 
 // LoadConfig builds a Config from environment variables. It validates every
@@ -85,6 +89,15 @@ func LoadConfig() (Config, error) {
 			errs = append(errs, fmt.Errorf("%s must be a boolean (true/false), got %q", EnvInsecureTLS, raw))
 		} else {
 			cfg.InsecureTLS = insecure
+		}
+	}
+
+	if raw := os.Getenv(EnvAllowWrite); raw != "" {
+		allow, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s must be a boolean (true/false), got %q", EnvAllowWrite, raw))
+		} else {
+			cfg.AllowWrite = allow
 		}
 	}
 

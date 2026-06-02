@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -145,5 +146,136 @@ func TestClientQueryParameters(t *testing.T) {
 	var items []map[string]any
 	if err := json.Unmarshal(raw, &items); err != nil || len(items) != 1 {
 		t.Errorf("unexpected payload %s (err=%v)", raw, err)
+	}
+}
+
+// captureRequest records the method, path and parsed form of the request, and
+// replies with a UPID payload.
+func captureRequest(t *testing.T, method, path *string, form *url.Values) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		*method = r.Method
+		*path = r.URL.Path
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		*form = r.PostForm
+		w.Write([]byte(`{"data": "UPID:thor:00001234:..:task:"}`))
+	}
+}
+
+func TestClientMutationsSendCorrectRequests(t *testing.T) {
+	const wantUPID = "UPID:thor:00001234:..:task:"
+	tests := []struct {
+		name       string
+		call       func(c *Client) (string, error)
+		wantMethod string
+		wantPath   string
+		wantForm   map[string]string
+	}{
+		{
+			name:       "start guest",
+			call:       func(c *Client) (string, error) { return c.StartGuest(context.Background(), "thor", "qemu", 103) },
+			wantMethod: http.MethodPost,
+			wantPath:   "/api2/json/nodes/thor/qemu/103/status/start",
+		},
+		{
+			name: "create snapshot",
+			call: func(c *Client) (string, error) {
+				return c.CreateSnapshot(context.Background(), "thor", "qemu", 103, "before-upgrade", "pre", true)
+			},
+			wantMethod: http.MethodPost,
+			wantPath:   "/api2/json/nodes/thor/qemu/103/snapshot",
+			wantForm:   map[string]string{"snapname": "before-upgrade", "description": "pre", "vmstate": "1"},
+		},
+		{
+			name: "rollback snapshot",
+			call: func(c *Client) (string, error) {
+				return c.RollbackSnapshot(context.Background(), "thor", "lxc", 200, "before-upgrade")
+			},
+			wantMethod: http.MethodPost,
+			wantPath:   "/api2/json/nodes/thor/lxc/200/snapshot/before-upgrade/rollback",
+		},
+		{
+			name: "clone vm",
+			call: func(c *Client) (string, error) {
+				return c.CloneVM(context.Background(), "loki", 100, 200, "clone", "thor", true)
+			},
+			wantMethod: http.MethodPost,
+			wantPath:   "/api2/json/nodes/loki/qemu/100/clone",
+			wantForm:   map[string]string{"newid": "200", "name": "clone", "target": "thor", "full": "1"},
+		},
+		{
+			name:       "delete guest",
+			call:       func(c *Client) (string, error) { return c.DeleteGuest(context.Background(), "thor", "qemu", 103) },
+			wantMethod: http.MethodDelete,
+			wantPath:   "/api2/json/nodes/thor/qemu/103",
+		},
+		{
+			name: "migrate guest online",
+			call: func(c *Client) (string, error) {
+				return c.MigrateGuest(context.Background(), "thor", "qemu", 103, "loki", true)
+			},
+			wantMethod: http.MethodPost,
+			wantPath:   "/api2/json/nodes/thor/qemu/103/migrate",
+			wantForm:   map[string]string{"target": "loki", "online": "1"},
+		},
+		{
+			name: "resize disk",
+			call: func(c *Client) (string, error) {
+				return c.ResizeDisk(context.Background(), "thor", "qemu", 103, "scsi0", "+10G")
+			},
+			wantMethod: http.MethodPut,
+			wantPath:   "/api2/json/nodes/thor/qemu/103/resize",
+			wantForm:   map[string]string{"disk": "scsi0", "size": "+10G"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotMethod, gotPath string
+			var gotForm url.Values
+			srv := httptest.NewServer(captureRequest(t, &gotMethod, &gotPath, &gotForm))
+			defer srv.Close()
+
+			upid, err := tt.call(NewClient(testConfig(srv.URL)))
+			if err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			if upid != wantUPID {
+				t.Errorf("UPID = %q, want %q", upid, wantUPID)
+			}
+			if gotMethod != tt.wantMethod {
+				t.Errorf("method = %q, want %q", gotMethod, tt.wantMethod)
+			}
+			if gotPath != tt.wantPath {
+				t.Errorf("path = %q, want %q", gotPath, tt.wantPath)
+			}
+			for k, want := range tt.wantForm {
+				if got := gotForm.Get(k); got != want {
+					t.Errorf("form[%q] = %q, want %q", k, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestClientTaskStatus(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte(`{"data": {"status": "stopped", "exitstatus": "OK"}}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(testConfig(srv.URL))
+	raw, err := client.TaskStatus(context.Background(), "thor", "UPID:thor:00001234:..:task:")
+	if err != nil {
+		t.Fatalf("TaskStatus: %v", err)
+	}
+	if want := "/api2/json/nodes/thor/tasks/UPID:thor:00001234:..:task:/status"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if !strings.Contains(string(raw), "exitstatus") {
+		t.Errorf("status payload missing exitstatus: %s", raw)
 	}
 }
